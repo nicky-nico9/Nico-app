@@ -1,0 +1,1029 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+import { LineChart, Line, ResponsiveContainer, Tooltip } from "recharts";
+
+// ═══════════════════════════════════════════════════════════════
+//  NICO — NINE INERGY CORPORATION
+//  Vercel Production Build v1
+//  localStorage · JSONBin collective · Full formula v16
+//  Point System: +1/day logged + +1/99 Wh total (lifetime)
+// ═══════════════════════════════════════════════════════════════
+
+// ── COLLECTIVE SYNC via JSONBin (free, no auth for public read) ─
+// Create a free bin at jsonbin.io — paste your bin ID below
+// Instructions: jsonbin.io → + New Bin → paste {} → copy the bin ID
+const JSONBIN_BIN_ID   = "YOUR_BIN_ID_HERE";   // e.g. "6657f3e7ad19ca34f88c3e5e"
+const JSONBIN_API_KEY  = "YOUR_API_KEY_HERE";   // from jsonbin.io → API Keys
+
+// ── localStorage HELPERS ──────────────────────────────────────
+function load(key) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch { return null; }
+}
+function save(key, val) {
+  try { if (val === null) localStorage.removeItem(key); else localStorage.setItem(key, JSON.stringify(val)); } catch {}
+}
+
+// ── COLLECTIVE HELPERS (JSONBin public API) ───────────────────
+async function loadCollective() {
+  try {
+    if (JSONBIN_BIN_ID === "YOUR_BIN_ID_HERE") return null;
+    const r = await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}/latest`, {
+      headers: { "X-Master-Key": JSONBIN_API_KEY, "X-Bin-Meta": "false" }
+    });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+async function saveCollective(data) {
+  try {
+    if (JSONBIN_BIN_ID === "YOUR_BIN_ID_HERE") return;
+    await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}`, {
+      method: "PUT",
+      headers: { "Content-Type":"application/json", "X-Master-Key": JSONBIN_API_KEY },
+      body: JSON.stringify(data)
+    });
+  } catch {}
+}
+
+// ── CLAUDE API ────────────────────────────────────────────────
+async function askClaude(prompt) {
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        system: `You are NICO KNOWS — the intelligent insight engine inside the NICO app (Nine Inergy Corporation). You deliver sharp, empowering, sourced facts about energy ownership, data ownership, human movement science, and AI's environmental cost. Voice: direct, precise, never alarmist. Always empowering. End every fact with a source in parentheses. Keep responses to 2-3 sentences max.`,
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+    const d = await r.json();
+    return d.content?.[0]?.text || null;
+  } catch { return null; }
+}
+
+// ── FORMULA ENGINE (exact v16 constants) ─────────────────────
+const GRAVITY = 9.81, LBS_TO_KG = 2.2046, JOULES_PER_WH = 3600;
+const CARDIO_GRID = 0.74, LIFT_GRID = 0.45, WALKING_WATTS = 65;
+const WALKING_PACE = 3.0, STEPS_PER_MILE = 2000;
+const LIFT_ROM   = { bench:0.45, squat:0.55, deadlift:0.60 };
+const SPEED_F    = { explosive:{f:1.5}, fast:{f:1.2}, normal:{f:1.0}, slow:{f:0.7} };
+const TEMPO_F    = { controlled:{f:1.0}, normal:{f:0.75}, fast:{f:0.4}, dropped:{f:0.05} };
+const LIFT_DEF   = { bench:{s:"normal",t:"controlled"}, squat:{s:"normal",t:"controlled"}, deadlift:{s:"explosive",t:"dropped"} };
+const RUN_W      = { moderate:140, vigorous:175 };
+const CYCLE_W    = { light:60, recreational:100, moderate:150, hard:200 };
+
+function calcPoints(totalWh, daysLogged) { return daysLogged + Math.floor(totalWh / 99); }
+function calcLifting(lbs,ex,reps,sets,spd,tmp) {
+  const kg=lbs/LBS_TO_KG, rom=LIFT_ROM[ex];
+  const base=(kg*GRAVITY*rom*reps*sets)/JOULES_PER_WH;
+  const ph1=base*SPEED_F[spd].f, ph2=base*TEMPO_F[tmp].f, total=ph1+ph2;
+  return {ph1,ph2,totalWh:total,gridWh:total*LIFT_GRID};
+}
+function calcRunning(mins,effort) {
+  const total=RUN_W[effort]*(mins/60);
+  return {totalWh:total,gridWh:total*CARDIO_GRID};
+}
+function calcCycling(mins,effort,custom) {
+  const w=custom>0?custom:CYCLE_W[effort];
+  const total=w*(mins/60);
+  return {totalWh:total,gridWh:total*CARDIO_GRID};
+}
+function calcWalking(steps,distMi,flights) {
+  const dist=distMi>0?distMi:steps/STEPS_PER_MILE;
+  const base=WALKING_WATTS*(dist/WALKING_PACE);
+  const bonus=flights>0?(flights*10/1000*0.15)*base:0;
+  const total=base+bonus;
+  return {totalWh:total,gridWh:total*CARDIO_GRID};
+}
+
+// ── COPPER CSS ────────────────────────────────────────────────
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800;900&family=Space+Mono:wght@400;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+body{background:#000;font-family:'Inter',sans-serif;color:#F2EDE6;min-height:100vh;display:flex;justify-content:center;overflow-x:hidden;}
+input,textarea,button{font-family:'Inter',sans-serif;}
+::-webkit-scrollbar{width:3px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:rgba(184,115,51,.25);border-radius:2px;}
+
+/* COPPER */
+.cu{background:linear-gradient(125deg,#F7CBAA 0%,#E8956D 14%,#B87333 32%,#9A5C28 50%,#E8956D 66%,#F7CBAA 76%,#7A3F18 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.cu-soft{background:linear-gradient(110deg,#E8956D 0%,#B87333 40%,#9A5C28 70%,#E8956D 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+
+/* COPPER CARD */
+.cu-card{position:relative;border-radius:22px;}
+.cu-card::before{content:'';position:absolute;inset:-1px;border-radius:23px;background:linear-gradient(135deg,rgba(247,203,170,.55),rgba(184,115,51,.22),rgba(74,34,16,.38),rgba(184,115,51,.22),rgba(247,203,170,.48));z-index:0;pointer-events:none;}
+.cu-card-inner{position:relative;z-index:1;background:#0d0d0d;border-radius:21px;overflow:hidden;}
+.cu-card-inner::before{content:'';position:absolute;inset:0;background:repeating-linear-gradient(78deg,transparent 0,rgba(255,255,255,.009) 1px,transparent 2px,transparent 10px);pointer-events:none;z-index:0;}
+
+/* COPPER BUTTON */
+.cu-btn{background:linear-gradient(118deg,#C47A3C 0%,#B87333 22%,#D4814A 46%,#B87333 70%,#9A5C28 100%);color:#040404;font-weight:900;letter-spacing:3px;font-size:11px;border:none;border-radius:14px;padding:18px;width:100%;cursor:pointer;position:relative;overflow:hidden;transition:all .15s ease;box-shadow:0 4px 24px rgba(184,115,51,.3),inset 0 1px 0 rgba(247,203,170,.45),inset 0 -1px 0 rgba(0,0,0,.35);}
+.cu-btn::before{content:'';position:absolute;top:0;left:-100%;width:55%;height:100%;background:linear-gradient(to right,transparent,rgba(255,255,255,.2),transparent);transform:skewX(-20deg);transition:left .55s ease;}
+.cu-btn:hover::before{left:160%;}
+.cu-btn:hover{transform:translateY(-1px);box-shadow:0 6px 32px rgba(184,115,51,.45);}
+.cu-btn:active{transform:translateY(1px);}
+.cu-btn:disabled{opacity:.4;cursor:not-allowed;transform:none;}
+
+/* COPPER LINE */
+.cu-line{height:1px;background:linear-gradient(to right,transparent,rgba(184,115,51,.45) 25%,rgba(247,203,170,.75) 50%,rgba(184,115,51,.45) 75%,transparent);}
+
+/* INPUTS */
+.nico-input{width:100%;background:#0d0d0d;border:1px solid #1a1a1a;border-radius:12px;padding:16px;color:#F2EDE6;font-size:16px;outline:none;transition:border-color .2s;}
+.nico-input:focus{border-color:rgba(184,115,51,.45);}
+.nico-input::placeholder{color:#28241F;}
+
+/* TABS */
+.tog{flex:1;background:#0d0d0d;border:1px solid #1a1a1a;border-radius:10px;padding:12px 6px;text-align:center;cursor:pointer;transition:all .2s;}
+.tog.on{border-color:rgba(184,115,51,.5);background:rgba(184,115,51,.08);}
+
+/* ACTIVITY CARD */
+.act-card{background:#0d0d0d;border:1px solid #1a1a1a;border-radius:18px;padding:20px 14px;cursor:pointer;transition:all .2s;position:relative;overflow:hidden;}
+.act-card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(to right,transparent,rgba(184,115,51,.3),transparent);}
+.act-card.sel{border-color:rgba(184,115,51,.55);background:rgba(184,115,51,.07);box-shadow:0 0 24px rgba(184,115,51,.1);}
+.act-card.sel::before{background:linear-gradient(to right,transparent,rgba(247,203,170,.65),transparent);}
+
+/* FILTER PILL */
+.pill{padding:6px 14px;border-radius:100px;border:1px solid #1a1a1a;background:#0d0d0d;color:#44403A;font-size:8px;letter-spacing:2px;font-weight:700;cursor:pointer;white-space:nowrap;transition:all .2s;}
+.pill.on{background:rgba(184,115,51,.12);border-color:rgba(184,115,51,.45);color:#E8956D;}
+
+/* PROGRESS */
+.prog-track{height:2px;background:#1a1a1a;border-radius:2px;overflow:hidden;}
+.prog-fill{height:100%;border-radius:2px;background:linear-gradient(to right,#4A2210,#B87333,#E8956D,#F7CBAA);box-shadow:0 0 8px rgba(184,115,51,.45);transition:width .35s ease;}
+
+/* STAT TOP LINE */
+.stat-top::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(to right,transparent,rgba(184,115,51,.45),transparent);}
+
+/* SETTINGS */
+.sett-row{display:flex;align-items:center;justify-content:space-between;padding:15px 16px;border-bottom:1px solid #1a1a1a;cursor:pointer;transition:background .15s;}
+.sett-row:last-child{border-bottom:none;}
+.sett-row:hover{background:#0d0d0d;}
+
+/* HIST ITEM */
+.hist-item{background:#0d0d0d;border:1px solid #1a1a1a;border-radius:16px;padding:16px;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+
+/* POINT BADGE */
+.pt-badge{display:inline-flex;align-items:center;gap:5px;background:rgba(184,115,51,.1);border:1px solid rgba(184,115,51,.3);border-radius:100px;padding:4px 12px;}
+
+/* COLLECTIVE METAL */
+.cu-metal{background:linear-gradient(118deg,#F7CBAA 0%,#D4814A 8%,#B87333 18%,#9A5C28 30%,#C47A3C 42%,#B87333 52%,#8B4513 62%,#A0622A 72%,#D4814A 83%,#E8956D 91%,#C47A3C 100%);position:relative;}
+.cu-metal::before{content:'';position:absolute;inset:0;background:repeating-linear-gradient(82deg,transparent 0,rgba(255,255,255,.018) 1px,transparent 2px,transparent 7px);border-radius:inherit;pointer-events:none;}
+.cu-metal::after{content:'';position:absolute;inset:0;background:linear-gradient(to bottom,rgba(247,203,170,.3) 0%,transparent 40%,rgba(0,0,0,.25) 100%);border-radius:inherit;pointer-events:none;}
+
+/* RECHARTS */
+.recharts-tooltip-wrapper .recharts-default-tooltip{background:#0d0d0d !important;border:1px solid #2a2a2a !important;border-radius:8px;font-size:11px;}
+
+/* MICRO */
+.micro{font-size:9px;color:#44403A;text-align:center;letter-spacing:.5px;line-height:1.6;}
+
+/* ANIMATIONS */
+@keyframes screenIn{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
+.screen-enter{animation:screenIn .28s cubic-bezier(.22,1,.36,1);}
+@keyframes numCount{from{opacity:0;transform:scale(.7);}to{opacity:1;transform:scale(1);}}
+@keyframes orbMat{0%{opacity:0;transform:scale(.2);filter:blur(20px);}60%{opacity:1;transform:scale(1.08);}100%{opacity:1;transform:scale(1);}}
+@keyframes letterEng{0%{opacity:0;transform:translateY(8px) scaleX(.8);filter:blur(4px);}100%{opacity:1;transform:translateY(0) scaleX(1);filter:blur(0);}}
+@keyframes tagFade{0%{opacity:0;letter-spacing:8px;}100%{opacity:1;letter-spacing:4px;}}
+@keyframes formRise{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:translateY(0);}}
+@keyframes scanLine{0%{top:-2px;}100%{top:102%;}}
+@keyframes lineReveal{0%{width:0;opacity:0;}100%{width:100%;opacity:1;}}
+@keyframes glowPulse{0%,100%{box-shadow:0 0 20px rgba(184,115,51,.25);}50%{box-shadow:0 0 50px rgba(184,115,51,.55);}}
+@keyframes orbFloat{0%,100%{transform:translateY(0);}50%{transform:translateY(-7px);}}
+@keyframes streamFlow{0%{stroke-dashoffset:200;}100%{stroke-dashoffset:0;}}
+@keyframes ringExp{0%{transform:scale(.2);opacity:1;}100%{transform:scale(3);opacity:0;}}
+@keyframes insightIn{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
+@keyframes streakBounce{0%,100%{transform:scale(1);}50%{transform:scale(1.04);}}
+.ob-letter{display:inline-block;opacity:0;}
+.ob-letter.show{animation:letterEng .5s cubic-bezier(.22,1,.36,1) forwards;}
+.ob-tagline{opacity:0;}
+.ob-tagline.show{animation:tagFade .8s ease forwards;}
+.ob-form{opacity:0;}
+.ob-form.show{animation:formRise .6s cubic-bezier(.22,1,.36,1) forwards;}
+.ob-line{height:1px;width:0;opacity:0;}
+.ob-line.show{animation:lineReveal .9s ease forwards;}
+.insight-card{animation:insightIn .5s cubic-bezier(.22,1,.36,1);}
+.streak-active{animation:streakBounce 2.8s ease-in-out infinite;}
+`;
+
+// ── STATS ─────────────────────────────────────────────────────
+const ALL_STATS = [
+  {cat:"WATER",  text:"Every <b>20–50 ChatGPT queries</b> evaporates ~<b>500 mL of freshwater</b> — one water bottle — through data center cooling.", source:"UC Riverside / Li et al., 2023"},
+  {cat:"WATER",  text:"AI data centers consumed <b>264 billion gallons of water in 2025</b> — equal to <b>1.8 million Americans'</b> annual usage.", source:"Mordor Intelligence / Barchart, 2026"},
+  {cat:"WATER",  text:"Training GPT-3 evaporated <b>700,000 liters of freshwater</b> on-site — equivalent to manufacturing <b>370 BMW cars</b>.", source:"UC Riverside, peer-reviewed, 2023"},
+  {cat:"WATER",  text:"By 2030, AI's water use is projected to match the <b>drinking water needs of 1.3 billion people</b>.", source:"UN University / UNU-INWEH, June 2026"},
+  {cat:"WATER",  text:"Your body uses about <b>3 liters of water a day</b>. A large data center: <b>5 million gallons</b>. Same planet. Different scale.", source:"NCBI / Brookings"},
+  {cat:"WATER",  text:"Over your lifetime you'll consume roughly <b>73,000 liters of water total</b> — less than a mid-sized data center uses <b>in under 8 hours</b>.", source:"DexaFit / Center for Sustainable Systems"},
+  {cat:"ENERGY", text:"Data center electricity use was flat 2005–2017 — then <b>AI changed everything: consumption doubled by 2023</b>.", source:"MIT Technology Review"},
+  {cat:"ENERGY", text:"An average <b>ChatGPT query uses ~0.34 Wh</b> — roughly <b>3–10× a Google search</b>.", source:"OpenAI / Sam Altman"},
+  {cat:"ENERGY", text:"Wind + solar hit a <b>record 17% of US electricity in 2025</b>, up from less than 1% in 2005. Solar grew <b>34% year-over-year</b>.", source:"EIA, March 2026"},
+  {cat:"ENERGY", text:"In 2025, the US generated <b>more electricity from wind+solar (19%) than coal (16%)</b> for the first time.", source:"EIA / Climate Central, 2026"},
+  {cat:"MOVE",   text:"<b>7,000 steps/day cuts early death risk by nearly 50%</b> — similar to 10,000 steps. Review of 57 studies, 227,000 participants.", source:"University of Sydney, July 2025"},
+  {cat:"MOVE",   text:"Every additional <b>1,000 steps/day</b> is associated with a <b>15% reduction in risk of dying</b> from any cause.", source:"Meta-analysis of 17 studies"},
+  {cat:"MOVE",   text:"Sitting more than <b>10.6 hours/day raises heart failure risk</b> — even in people who exercise regularly.", source:"JACC / American College of Cardiology, 2024"},
+  {cat:"MOVE",   text:"NEAT — all energy burned outside sleeping, eating, and exercise — can <b>vary by 2,000 calories/day</b> between similar-sized people.", source:"Dr. James Levine, Mayo Clinic"},
+  {cat:"OWN",    text:"The average American's personal data generates at least <b>$700/year for tech companies</b>. Meta alone: ~$217/user/year.", source:"Proton, financial-report analysis"},
+  {cat:"OWN",    text:"Big Tech generates up to <b>$160,000 in lifetime value per internet user</b>. For US users: an estimated <b>$8,500 per year</b>.", source:"Web3 Foundation report, 2026"},
+  {cat:"OWN",    text:"<b>80% of popular fitness apps</b> share your tracked data with third parties — including location, user ID, and behavioral profiles.", source:"Surfshark / TechRadar, Dec 2024"},
+  {cat:"OWN",    text:"<b>78% of fitness apps shared data with Meta and Google</b> even when users had accounts set to 'private.'", source:"Health data privacy investigation, 2023"},
+  {cat:"OWN",    text:"The EU Data Act took full effect <b>September 12, 2025</b> — giving EU citizens the legal right to own data their devices generate.", source:"European Commission, 2025"},
+  {cat:"OWN",    text:"The WEF calls personal data <b>'an emerging asset class comparable to oil or gold'</b> — yet most people have zero share in the value.", source:"World Economic Forum / Web3 Foundation"},
+  {cat:"OWN",    text:"Fitness apps made <b>$6 billion in revenue in 2025</b>. Your movement data is a parallel revenue stream most users never see.", source:"Business of Apps, March 2026"},
+  {cat:"OWN",    text:"<b>Strava's global heatmap exposed secret military bases</b> worldwide. In 2025, French nuclear submarine crews leaked patrol positions through fitness tracking.", source:"Livity health data privacy report, 2026"},
+];
+const CATS = ["ALL","WATER","ENERGY","MOVE","OWN"];
+
+// ── BOLT ICON ─────────────────────────────────────────────────
+function BoltIcon({size=20}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 22 22" fill="none">
+      <defs><linearGradient id="bcg" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stopColor="#F7CBAA"/><stop offset="35%" stopColor="#E8956D"/>
+        <stop offset="65%" stopColor="#B87333"/><stop offset="100%" stopColor="#4A2210"/>
+      </linearGradient></defs>
+      <rect width="22" height="22" rx="6" fill="url(#bcg)"/>
+      <path d="M13 2L5 13h7l-3 7 10-11h-7l3-7z" fill="#040404" opacity=".85"/>
+    </svg>
+  );
+}
+
+// ── CANVAS VAULT ──────────────────────────────────────────────
+function DataBankVault({wh, activity, visible, founderNum, onComplete}) {
+  const canvasRef=useRef(null), animRef=useRef(null);
+  const stateRef=useRef({phase:0,displayWh:"0.0",particles:[]});
+  const [phase,setPhase]=useState(0);
+  const [displayWh,setDisplay]=useState("0.0");
+  const [statusMsg,setStatus]=useState("");
+  const actEmoji={run:"🏃",cycle:"🚴",walk:"🚶",lift:"🏋️"}[activity]||"⚡";
+  const target=parseFloat(wh)||0;
+
+  useEffect(()=>{
+    if(!visible){stateRef.current={phase:0,displayWh:"0.0",particles:[]};setPhase(0);setDisplay("0.0");setStatus("");if(animRef.current)cancelAnimationFrame(animRef.current);return;}
+    const canvas=canvasRef.current; if(!canvas)return;
+    const ctx=canvas.getContext("2d");
+    const W=canvas.width=Math.min(360,window.innerWidth-20);
+    const H=canvas.height=240;
+    const PX=72,PY=120,VX=W-80,VY=120;
+    const mkP=(i)=>({x:PX+(Math.random()-.5)*14,y:PY+(Math.random()-.5)*38,tx:VX+(Math.random()-.5)*18,ty:VY+(Math.random()-.5)*22,progress:0,speed:.007+Math.random()*.007,r:1.4+Math.random()*2.2,alpha:.55+Math.random()*.4,color:["#F7CBAA","#E8956D","#B87333","#D4814A","#9A5C28"][i%5],delay:i*52,born:false});
+    const particles=Array.from({length:32},(_,i)=>mkP(i));
+    let startTime=null,counting=false,countVal=0;
+    const drawPerson=(a)=>{ctx.save();ctx.globalAlpha=a;ctx.strokeStyle="#B87333";ctx.lineWidth=1.8;ctx.lineCap="round";ctx.beginPath();ctx.arc(PX,PY-43,13,0,Math.PI*2);ctx.stroke();ctx.fillStyle="rgba(184,115,51,.12)";ctx.fill();ctx.beginPath();ctx.moveTo(PX-8,PY-29);ctx.quadraticCurveTo(PX-14,PY-8,PX-16,PY+19);ctx.moveTo(PX-8,PY-29);ctx.quadraticCurveTo(PX,PY-10,PX+8,PY-29);ctx.moveTo(PX+8,PY-29);ctx.quadraticCurveTo(PX+14,PY-8,PX+16,PY+19);ctx.moveTo(PX-6,PY-20);ctx.quadraticCurveTo(PX-20,PY-12,PX-24,PY+3);ctx.moveTo(PX+6,PY-20);ctx.quadraticCurveTo(PX+20,PY-12,PX+24,PY+3);ctx.stroke();ctx.globalAlpha=a*.7;ctx.font="14px Inter";ctx.textAlign="center";ctx.fillStyle="#8A857C";ctx.fillText(actEmoji,PX,PY+40);ctx.restore();};
+    const drawVault=(lit)=>{const g=ctx.createLinearGradient(VX-42,VY-52,VX-42,VY+52);g.addColorStop(0,"#F7CBAA");g.addColorStop(.3,"#E8956D");g.addColorStop(.6,"#B87333");g.addColorStop(1,"#4A2210");ctx.save();if(lit){ctx.shadowColor="rgba(184,115,51,.75)";ctx.shadowBlur=36;}ctx.globalAlpha=lit?1:.4;ctx.beginPath();ctx.roundRect(VX-42,VY-52,84,104,10);ctx.fillStyle=g;ctx.fill();ctx.shadowBlur=0;ctx.globalAlpha=.08;for(let i=0;i<6;i++){ctx.beginPath();ctx.moveTo(VX-42,VY-40+i*18);ctx.lineTo(VX+42,VY-40+i*18);ctx.strokeStyle="#000";ctx.lineWidth=.5;ctx.stroke();}ctx.globalAlpha=lit?1:.4;ctx.beginPath();ctx.moveTo(VX,VY-52);ctx.lineTo(VX,VY+52);ctx.strokeStyle="rgba(0,0,0,.35)";ctx.lineWidth=1.5;ctx.stroke();ctx.beginPath();ctx.arc(VX,VY,20,0,Math.PI*2);ctx.strokeStyle="rgba(0,0,0,.5)";ctx.lineWidth=2.5;ctx.stroke();ctx.beginPath();ctx.arc(VX,VY,14,0,Math.PI*2);ctx.fillStyle="rgba(0,0,0,.3)";ctx.strokeStyle="rgba(247,203,170,.35)";ctx.lineWidth=1;ctx.fill();ctx.stroke();const jg=ctx.createRadialGradient(VX-3,VY-3,0,VX,VY,7);jg.addColorStop(0,"#F7CBAA");jg.addColorStop(1,"#B87333");ctx.beginPath();ctx.arc(VX,VY,6,0,Math.PI*2);ctx.fillStyle=jg;ctx.fill();ctx.font="bold 9px 'Space Mono',monospace";ctx.textAlign="center";ctx.fillStyle="rgba(0,0,0,.65)";ctx.globalAlpha=.7;ctx.fillText("999",VX,VY+70);ctx.globalAlpha=.2;ctx.fillStyle="#F7CBAA";ctx.beginPath();ctx.roundRect(VX-42,VY-52,84,30,[10,10,0,0]);ctx.fill();ctx.restore();};
+    const drawStreams=(t)=>{[[PX,PY-22],[PX,PY],[PX,PY+22]].forEach(([sx,sy])=>{const g=ctx.createLinearGradient(sx,sy,VX,VY);g.addColorStop(0,"rgba(232,149,109,0)");g.addColorStop(.4,"rgba(184,115,51,.45)");g.addColorStop(.7,"rgba(247,203,170,.55)");g.addColorStop(1,"rgba(232,149,109,0)");ctx.beginPath();ctx.moveTo(sx,sy);ctx.quadraticCurveTo((sx+VX)/2,sy+(Math.sin(t+sy)*.5)*8,VX,VY+(sy-PY)*.3);ctx.strokeStyle=g;ctx.lineWidth=1.2;ctx.setLineDash([6,5]);ctx.lineDashOffset=-t*55;ctx.globalAlpha=.5;ctx.stroke();ctx.setLineDash([]);});};
+    const drawRings=(t)=>{[0,.33,.66].forEach(off=>{const s=((t*.55+off)%1);ctx.beginPath();ctx.arc(VX,VY,28+s*72,0,Math.PI*2);ctx.strokeStyle=`rgba(184,115,51,${(1-s)*.5})`;ctx.lineWidth=1.2;ctx.globalAlpha=1;ctx.stroke();});};
+    const drawTag=(val,t)=>{const tx=(PX+VX)/2,ty=PY-52+Math.sin(t*2.2)*7;ctx.save();ctx.globalAlpha=.92;ctx.fillStyle="rgba(184,115,51,.14)";ctx.strokeStyle="rgba(184,115,51,.45)";ctx.lineWidth=1;ctx.beginPath();ctx.roundRect(tx-34,ty-11,68,22,11);ctx.fill();ctx.stroke();ctx.font="bold 10px 'Space Mono',monospace";ctx.textAlign="center";ctx.fillStyle="#E8956D";ctx.globalAlpha=1;ctx.fillText(`${val} Wh`,tx,ty+5);ctx.restore();};
+    const frame=(ts)=>{if(!startTime)startTime=ts;const t=(ts-startTime)/1000;ctx.clearRect(0,0,W,H);const bg=ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,190);bg.addColorStop(0,"rgba(184,115,51,.055)");bg.addColorStop(1,"transparent");ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);const ph=stateRef.current.phase;if(ph>=1){drawStreams(t);drawPerson(1);drawVault(ph>=2);particles.forEach((p,i)=>{if((ts-startTime)<p.delay)return;if(!p.born)p.born=true;p.progress=Math.min(p.progress+p.speed,1);if(p.progress>=1){Object.assign(p,mkP(i));p.delay=0;p.born=true;}const e=p.progress<.5?2*p.progress*p.progress:-1+(4-2*p.progress)*p.progress;const cx=p.x+(p.tx-p.x)*e,cy=p.y+(p.ty-p.y)*e+Math.sin(e*Math.PI)*(-28+i%3*9);ctx.beginPath();ctx.arc(cx,cy,p.r,0,Math.PI*2);ctx.fillStyle=p.color;ctx.globalAlpha=p.alpha*(1-Math.abs(e-.5)*.55);ctx.fill();const pe=Math.max(0,e-.055),px2=p.x+(p.tx-p.x)*pe,py2=p.y+(p.ty-p.y)*pe+Math.sin(pe*Math.PI)*(-28+i%3*9);const tg=ctx.createLinearGradient(px2,py2,cx,cy);tg.addColorStop(0,"transparent");tg.addColorStop(1,p.color);ctx.beginPath();ctx.moveTo(px2,py2);ctx.lineTo(cx,cy);ctx.strokeStyle=tg;ctx.lineWidth=p.r*.75;ctx.globalAlpha=p.alpha*.38;ctx.stroke();});if(ph>=2)drawRings(t);drawTag(stateRef.current.displayWh,t);if(ph>=2&&!counting){counting=true;const iv=setInterval(()=>{countVal=Math.min(countVal+target/40,target);stateRef.current.displayWh=countVal.toFixed(1);setDisplay(countVal.toFixed(1));if(countVal>=target)clearInterval(iv);},30);}}animRef.current=requestAnimationFrame(frame);};
+    setTimeout(()=>{stateRef.current.phase=1;setPhase(1);setStatus("STREAMING TO THE VAULT...");},100);
+    setTimeout(()=>{stateRef.current.phase=2;setPhase(2);setStatus("ENTERING THE COLLECTIVE RECORD...");},1500);
+    setTimeout(()=>{stateRef.current.phase=3;setPhase(3);setStatus("YOUR ENERGY IS OWNED ⚡");},3400);
+    setTimeout(()=>{if(animRef.current)cancelAnimationFrame(animRef.current);onComplete?.();},4300);
+    animRef.current=requestAnimationFrame(frame);
+    return()=>{if(animRef.current)cancelAnimationFrame(animRef.current);};
+  },[visible]);
+
+  if(!visible)return null;
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.97)",zIndex:999,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",overflow:"hidden"}}>
+      <div style={{position:"absolute",width:440,height:440,borderRadius:"50%",background:"radial-gradient(circle,rgba(184,115,51,.08) 0%,transparent 70%)",top:"50%",left:"50%",transform:"translate(-50%,-50%)",animation:"glowPulse 2.5s ease-in-out infinite",pointerEvents:"none"}}/>
+      <canvas ref={canvasRef} style={{display:"block",maxWidth:"100%"}}/>
+      {phase>=2&&(
+        <div style={{textAlign:"center",marginTop:10,animation:"numCount .4s ease"}}>
+          <div style={{fontFamily:"'Space Mono',monospace",fontSize:56,fontWeight:700,lineHeight:1,letterSpacing:-2,background:"linear-gradient(125deg,#F7CBAA 0%,#E8956D 15%,#B87333 35%,#9A5C28 52%,#E8956D 68%,#F7CBAA 78%,#7A3F18 100%)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",backgroundClip:"text"}}>{displayWh}</div>
+          <div style={{fontSize:11,letterSpacing:5,fontWeight:700,color:"#B87333",marginTop:2}}>Wh YOURS FOREVER</div>
+        </div>
+      )}
+      <div style={{marginTop:16,fontSize:11,letterSpacing:3,fontWeight:700,color:phase===1?"#44403A":phase===2?"#B87333":"#E8956D",transition:"color .6s ease",minHeight:18}}>{statusMsg}</div>
+      <div style={{marginTop:6,fontSize:9,color:"#28241F",letterSpacing:2}}>FOUNDER #{founderNum||"001"} · 999 FOUNDERS</div>
+    </div>
+  );
+}
+
+// ── COPPER ORB CANVAS ─────────────────────────────────────────
+function CopperOrb({wh=0, size=72}) {
+  const ref=useRef(null), animRef=useRef(null);
+  useEffect(()=>{
+    const c=ref.current; if(!c)return;
+    const ctx=c.getContext("2d"); c.width=c.height=size*2;
+    const cx=size,cy=size; let t=0;
+    const draw=()=>{
+      ctx.clearRect(0,0,size*2,size*2);
+      const intensity=Math.min(1,(wh||0)/300);
+      const pulse=.85+Math.sin(t*1.8)*.08;
+      const og=ctx.createRadialGradient(cx,cy,0,cx,cy,size*.95);
+      og.addColorStop(0,`rgba(184,115,51,${.1+Math.sin(t)*.04})`); og.addColorStop(1,"transparent");
+      ctx.fillStyle=og; ctx.beginPath(); ctx.arc(cx,cy,size*.95,0,Math.PI*2); ctx.fill();
+      const mg=ctx.createRadialGradient(cx*.8,cy*.7,0,cx,cy,size*.7*pulse);
+      mg.addColorStop(0,"#F7CBAA"); mg.addColorStop(.3,"#E8956D"); mg.addColorStop(.6,"#B87333"); mg.addColorStop(1,"#4A2210");
+      ctx.shadowColor=`rgba(184,115,51,${.5+intensity*.3})`; ctx.shadowBlur=18+intensity*20;
+      ctx.beginPath(); ctx.arc(cx,cy,size*.7*pulse,0,Math.PI*2); ctx.fillStyle=mg; ctx.fill(); ctx.shadowBlur=0;
+      const sg=ctx.createRadialGradient(cx*.7,cy*.65,0,cx*.75,cy*.7,size*.28);
+      sg.addColorStop(0,"rgba(247,203,170,.4)"); sg.addColorStop(1,"transparent");
+      ctx.fillStyle=sg; ctx.beginPath(); ctx.arc(cx*.78,cy*.72,size*.28,0,Math.PI*2); ctx.fill();
+      t+=.03; animRef.current=requestAnimationFrame(draw);
+    };
+    animRef.current=requestAnimationFrame(draw);
+    return()=>{if(animRef.current)cancelAnimationFrame(animRef.current);};
+  },[size,wh]);
+  return <canvas ref={ref} style={{width:size,height:size,display:"block"}}/>;
+}
+
+// ── STREAK RING ───────────────────────────────────────────────
+function StreakRing({current=0, best=0, size=64}) {
+  const ref=useRef(null), animRef=useRef(null);
+  useEffect(()=>{
+    const c=ref.current; if(!c)return;
+    const ctx=c.getContext("2d"); c.width=c.height=size*2;
+    const cx=size,cy=size,r=size*.72;
+    const pct=best>0?Math.min(current/Math.max(best,7),1):0;
+    const target=pct*Math.PI*2*.82, start=-Math.PI/2+Math.PI*.09;
+    let drawn=0;
+    const frame=()=>{
+      ctx.clearRect(0,0,size*2,size*2);
+      ctx.beginPath(); ctx.arc(cx,cy,r,start,start+Math.PI*2*.82); ctx.strokeStyle="rgba(184,115,51,.12)"; ctx.lineWidth=8; ctx.lineCap="round"; ctx.stroke();
+      if(drawn<target)drawn=Math.min(drawn+target/28,target);
+      const g=ctx.createLinearGradient(cx-r,cy,cx+r,cy); g.addColorStop(0,"#4A2210"); g.addColorStop(.4,"#B87333"); g.addColorStop(.7,"#E8956D"); g.addColorStop(1,"#F7CBAA");
+      ctx.beginPath(); ctx.arc(cx,cy,r,start,start+drawn); ctx.strokeStyle=g; ctx.lineWidth=8; ctx.lineCap="round"; ctx.shadowColor="rgba(184,115,51,.55)"; ctx.shadowBlur=10; ctx.stroke(); ctx.shadowBlur=0;
+      if(drawn>0){const ex=cx+Math.cos(start+drawn)*r,ey=cy+Math.sin(start+drawn)*r; ctx.beginPath(); ctx.arc(ex,ey,5,0,Math.PI*2); ctx.fillStyle="#F7CBAA"; ctx.shadowColor="rgba(247,203,170,.8)"; ctx.shadowBlur=12; ctx.fill(); ctx.shadowBlur=0;}
+      if(drawn<target)animRef.current=requestAnimationFrame(frame);
+    };
+    animRef.current=requestAnimationFrame(frame);
+    return()=>{if(animRef.current)cancelAnimationFrame(animRef.current);};
+  },[current,best,size]);
+  return(
+    <div style={{position:"relative",width:size,height:size,flexShrink:0}}>
+      <canvas ref={ref} style={{position:"absolute",top:0,left:0,width:size,height:size}}/>
+      <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
+        <div style={{fontFamily:"'Space Mono',monospace",fontSize:size*.25,fontWeight:700,lineHeight:1,background:"linear-gradient(125deg,#F7CBAA,#E8956D 35%,#B87333 65%,#7A3F18)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",backgroundClip:"text"}}>{current}{current>=3?" 🔥":""}</div>
+        <div style={{fontSize:size*.1,letterSpacing:2,fontWeight:700,color:"#44403A",marginTop:1}}>DAY{current!==1?"S":""}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── ENERGY REVEAL ─────────────────────────────────────────────
+function EnergyReveal({wh}) {
+  const [shown,setShown]=useState("0.00");
+  useEffect(()=>{
+    let n=0; const tgt=parseFloat(wh)||0;
+    const iv=setInterval(()=>{n=Math.min(n+tgt/48,tgt);setShown(n.toFixed(2));if(n>=tgt)clearInterval(iv);},25);
+    return()=>clearInterval(iv);
+  },[wh]);
+  return(
+    <div style={{textAlign:"center",padding:"24px 0 18px"}}>
+      <div style={{fontSize:9,letterSpacing:5,fontWeight:700,color:"#B87333",marginBottom:12}}>ENERGY YOU PRODUCED</div>
+      <div style={{fontFamily:"'Space Mono',monospace",fontSize:68,fontWeight:700,letterSpacing:-3,lineHeight:1,background:"linear-gradient(125deg,#F7CBAA 0%,#E8956D 15%,#B87333 35%,#9A5C28 52%,#E8956D 68%,#F7CBAA 78%,#7A3F18 100%)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",backgroundClip:"text",animation:"numCount .4s ease"}}>{shown}</div>
+      <div style={{fontSize:13,letterSpacing:6,fontWeight:700,color:"#B87333",marginTop:4}}>Wh</div>
+    </div>
+  );
+}
+
+// ── LUXURY ONBOARD ────────────────────────────────────────────
+function LuxuryOnboard({nameInput,setNameInput,founderInput,setFounderInput,onSubmit}) {
+  const [letters,setLetters]=useState([false,false,false,false]);
+  const [tagline,setTag]=useState(false);
+  const [line1,setLine1]=useState(false);
+  const [decls,setDecls]=useState([false,false,false,false,false]);
+  const [formVis,setForm]=useState(false);
+  const [scan,setScan]=useState(false);
+  const orbRef=useRef(null), orbAnim=useRef(null);
+  const [orbReady,setOrbReady]=useState(false);
+
+  useEffect(()=>{
+    setTimeout(()=>{setOrbReady(true);setScan(true);},200);
+    setTimeout(()=>setLetters(l=>[true,l[1],l[2],l[3]]),900);
+    setTimeout(()=>setLetters(l=>[l[0],true,l[2],l[3]]),1050);
+    setTimeout(()=>setLetters(l=>[l[0],l[1],true,l[3]]),1200);
+    setTimeout(()=>setLetters([true,true,true,true]),1350);
+    setTimeout(()=>setTag(true),1700);
+    setTimeout(()=>setLine1(true),2100);
+    setTimeout(()=>setDecls(d=>[true,d[1],d[2],d[3],d[4]]),2400);
+    setTimeout(()=>setDecls(d=>[d[0],true,d[2],d[3],d[4]]),2700);
+    setTimeout(()=>setDecls(d=>[d[0],d[1],true,d[3],d[4]]),3000);
+    setTimeout(()=>setDecls(d=>[d[0],d[1],d[2],true,d[4]]),3300);
+    setTimeout(()=>setDecls([true,true,true,true,true]),3600);
+    setTimeout(()=>setForm(true),4000);
+  },[]);
+
+  const DECLS=["You are not downloading an app.","You are joining a movement.","Your energy belongs to you.","Your data belongs to you.","Both of these are permanent."];
+  return(
+    <div style={{position:"absolute",inset:0,background:"#000",display:"flex",flexDirection:"column",alignItems:"center",padding:"48px 28px 40px",overflow:"hidden",zIndex:10}}>
+      {scan&&<div style={{position:"absolute",left:0,right:0,height:1,background:"linear-gradient(to right,transparent,rgba(184,115,51,.3) 30%,rgba(247,203,170,.5) 50%,rgba(184,115,51,.3) 70%,transparent)",animation:"scanLine 2.8s ease-in-out 1",pointerEvents:"none",zIndex:20}}/>}
+      <div style={{opacity:orbReady?1:0,marginBottom:24,animation:orbReady?"orbMat .9s cubic-bezier(.22,1,.36,1) forwards":"none"}}>
+        <CopperOrb wh={0} size={72}/>
+      </div>
+      <div style={{fontFamily:"'Space Mono',monospace",fontSize:38,fontWeight:700,letterSpacing:10,marginBottom:10,display:"flex",gap:2}}>
+        {["N","I","C","O"].map((l,i)=>(
+          <span key={i} className={`ob-letter${letters[i]?" show":""}`} style={{background:"linear-gradient(125deg,#F7CBAA 0%,#E8956D 14%,#B87333 32%,#9A5C28 50%,#E8956D 66%,#F7CBAA 76%,#7A3F18 100%)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",backgroundClip:"text"}}>{l}</span>
+        ))}
+      </div>
+      <div className={`ob-tagline${tagline?" show":""}`} style={{fontSize:9,letterSpacing:4,color:"#44403A",marginBottom:20}}>NINE INERGY CORPORATION</div>
+      <div className={`ob-line${line1?" show":""}`} style={{background:"linear-gradient(to right,transparent,rgba(184,115,51,.5) 25%,rgba(247,203,170,.8) 50%,rgba(184,115,51,.5) 75%,transparent)",marginBottom:24,alignSelf:"stretch"}}/>
+      <div style={{width:"100%",marginBottom:28}}>
+        {DECLS.map((d,i)=>(
+          <div key={i} className={`ob-tagline${decls[i]?" show":""}`} style={{fontSize:12,fontWeight:300,color:i<2?"#8A857C":"#E8956D",lineHeight:1.9,textAlign:"center",letterSpacing:.5,animationDuration:".7s"}}>{d}</div>
+        ))}
+      </div>
+      <div className={`ob-form${formVis?" show":""}`} style={{width:"100%"}}>
+        <div style={{height:1,background:"linear-gradient(to right,transparent,rgba(184,115,51,.35) 25%,rgba(247,203,170,.6) 50%,rgba(184,115,51,.35) 75%,transparent)",marginBottom:24}}/>
+        <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>YOUR NAME</div>
+        <input className="nico-input" style={{marginBottom:16}} placeholder="e.g. Nicholas" value={nameInput} onChange={e=>setNameInput(e.target.value)} autoFocus/>
+        <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>FOUNDER NUMBER</div>
+        <input className="nico-input" style={{marginBottom:24}} placeholder="e.g. 001" value={founderInput} onChange={e=>setFounderInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&onSubmit()}/>
+        <button className="cu-btn" onClick={onSubmit} style={{fontSize:12,letterSpacing:4}}>ENTER THE MOVEMENT →</button>
+        <div style={{fontSize:9,color:"#28241F",textAlign:"center",marginTop:16,letterSpacing:.5,lineHeight:1.8}}>Your number is permanent. It cannot be reissued.<br/>Only 999 will ever exist.</div>
+      </div>
+    </div>
+  );
+}
+
+// ── CEREMONY ──────────────────────────────────────────────────
+function CeremonyScreen({profile,onEnter}) {
+  const [p,setP]=useState(0);
+  useEffect(()=>{
+    setTimeout(()=>setP(1),400); setTimeout(()=>setP(2),900);
+    setTimeout(()=>setP(3),1600); setTimeout(()=>setP(4),2300);
+    setTimeout(()=>setP(5),3200);
+  },[]);
+  const joined=profile?.joined?new Date(profile.joined).toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"}):null;
+  return(
+    <div style={{position:"absolute",inset:0,background:"#000",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"0 32px",zIndex:20,overflow:"hidden"}}>
+      <div style={{position:"absolute",width:500,height:500,borderRadius:"50%",background:"radial-gradient(circle,rgba(184,115,51,.07) 0%,transparent 65%)",top:"50%",left:"50%",transform:"translate(-50%,-50%)",pointerEvents:"none"}}/>
+      <div style={{fontSize:10,letterSpacing:6,fontWeight:700,color:"#44403A",marginBottom:16,textAlign:"center",opacity:p>=1?1:0,transform:`translateY(${p>=1?0:10}px)`,transition:"opacity .7s ease,transform .7s ease"}}>YOU'RE FOUNDER</div>
+      <div style={{fontFamily:"'Space Mono',monospace",fontSize:88,fontWeight:700,lineHeight:1,letterSpacing:-2,textAlign:"center",marginBottom:8,opacity:p>=2?1:0,transform:`scale(${p>=2?1:.7})`,transition:"opacity .6s ease,transform .6s cubic-bezier(.22,1,.36,1)",background:"linear-gradient(125deg,#F7CBAA 0%,#E8956D 14%,#B87333 32%,#9A5C28 50%,#E8956D 66%,#F7CBAA 76%,#7A3F18 100%)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",backgroundClip:"text"}}>#{profile?.founderNum}</div>
+      <div style={{fontSize:13,letterSpacing:8,fontWeight:700,color:"#44403A",marginBottom:40,textAlign:"center",opacity:p>=3?1:0,transition:"opacity .6s ease"}}>OF 999</div>
+      <div style={{height:1,alignSelf:"stretch",marginBottom:40,background:"linear-gradient(to right,transparent,rgba(184,115,51,.5) 25%,rgba(247,203,170,.8) 50%,rgba(184,115,51,.5) 75%,transparent)",opacity:p>=3?1:0,transition:"opacity .8s ease"}}/>
+      <div style={{textAlign:"center",opacity:p>=4?1:0,transform:`translateY(${p>=4?0:8}px)`,transition:"opacity .7s ease,transform .7s ease"}}>
+        <div style={{fontSize:15,fontWeight:300,color:"#8A857C",lineHeight:1.8}}>This status is permanent.</div>
+        <div style={{fontSize:15,fontWeight:300,color:"#8A857C",lineHeight:1.8}}>It can never be given again.</div>
+        {joined&&<div style={{fontSize:10,color:"#28241F",letterSpacing:2,marginTop:8}}>{joined.toUpperCase()}</div>}
+      </div>
+      <div style={{width:"100%",marginTop:48,opacity:p>=5?1:0,transform:`translateY(${p>=5?0:12}px)`,transition:"opacity .6s ease,transform .6s cubic-bezier(.22,1,.36,1)"}}>
+        <button className="cu-btn" onClick={onEnter} style={{fontSize:12,letterSpacing:5}}>ENTER NICO</button>
+        <div style={{fontSize:9,color:"#28241F",textAlign:"center",marginTop:14,letterSpacing:.5,lineHeight:1.7}}>Your record starts with your first log.</div>
+      </div>
+    </div>
+  );
+}
+
+// ── HEALTH GUIDE ──────────────────────────────────────────────
+function HealthGuide({onClose}) {
+  const guides=[
+    {icon:"🦶",title:"STEPS & FLIGHTS (Walk)",steps:["Open Apple Health on your iPhone.","Steps are on the Summary page — or Browse → Activity → Steps.","Flights Climbed is in the same Activity section.","No iPhone? Any pedometer or fitness tracker works. An honest estimate is a real number."],note:"Your watch syncs automatically to Health — check there first."},
+    {icon:"🚴",title:"CYCLING WATTS",steps:["Peloton: open the app → your ride → Average Output (watts).","Zwift / Wahoo / Garmin: ride summary → Average Power (W).","No power meter? Choose an effort level — NICO uses published averages."],note:"Smart trainers show avg watts directly. Use that number."},
+    {icon:"🏃",title:"RUN DURATION",steps:["Apple Health → Browse → Activity → Walking + Running Distance.","Or check your running app (Nike Run Club, Strava, Garmin) for duration.","No tracker? A clock works. Duration + effort is all NICO needs."],note:"Distance and pace are in every running app — duration is all NICO asks for."},
+    {icon:"🏋️",title:"LIFTING",steps:["No app needed — the bar tells you everything.","Weight on the bar (lbs) · reps · sets.","Then answer honestly: how explosive was the lift, how controlled the lower?"],note:"The honest answers are the measurement. Controlled tempos generate more energy — that's physics, not flattery."},
+  ];
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.97)",zIndex:200,overflowY:"auto",padding:"28px 20px 60px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:24}}>
+        <span style={{fontSize:10,letterSpacing:1,fontWeight:700,color:"#B87333",cursor:"pointer"}} onClick={onClose}>← CLOSE</span>
+        <span className="cu" style={{fontSize:10,letterSpacing:4,fontWeight:700}}>WHERE TO FIND YOUR NUMBERS</span>
+      </div>
+      <div style={{fontSize:12,fontWeight:300,color:"#8A857C",lineHeight:1.7,marginBottom:24}}>Your watch and phone are already measuring.<br/>Here's exactly where to find every number NICO asks for.</div>
+      {guides.map((g,i)=>(
+        <div key={i} style={{background:"#0d0d0d",borderRadius:16,border:"1px solid #1a1a1a",padding:20,marginBottom:12,position:"relative",overflow:"hidden"}}>
+          <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:"linear-gradient(to right,transparent,rgba(184,115,51,.35),transparent)"}}/>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+            <span style={{fontSize:22}}>{g.icon}</span>
+            <span style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#B87333"}}>{g.title}</span>
+          </div>
+          {g.steps.map((s,j)=>(
+            <div key={j} style={{display:"flex",gap:10,marginBottom:8}}>
+              <span style={{fontSize:10,fontWeight:700,color:"#44403A",flexShrink:0,marginTop:1}}>{j+1}.</span>
+              <span style={{fontSize:13,fontWeight:300,color:"#8A857C",lineHeight:1.6}}>{s}</span>
+            </div>
+          ))}
+          <div style={{marginTop:12,padding:"10px 14px",borderRadius:10,background:"rgba(184,115,51,.05)",border:"1px solid rgba(184,115,51,.15)",fontSize:11,color:"#44403A",lineHeight:1.6}}>{g.note}</div>
+        </div>
+      ))}
+      <div style={{fontSize:10,color:"#28241F",textAlign:"center",padding:"16px 0",lineHeight:1.7}}>Wearables are the instruments.<br/>NICO is the ledger.</div>
+    </div>
+  );
+}
+
+// ── NICO KNOWS MINI ───────────────────────────────────────────
+function NicoKnowsMini({stat,onNext,onExpand}) {
+  if(!stat)return null;
+  return(
+    <div className="cu-card" style={{cursor:"pointer",marginBottom:16}} onClick={onExpand}>
+      <div className="cu-card-inner" style={{padding:20}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+          <BoltIcon size={18}/>
+          <span className="cu" style={{fontSize:9,letterSpacing:4,fontWeight:700}}>NICO KNOWS</span>
+          <span style={{marginLeft:"auto",fontSize:7,letterSpacing:2,fontWeight:700,padding:"3px 8px",borderRadius:100,background:"rgba(184,115,51,.12)",border:"1px solid rgba(184,115,51,.25)",color:"#E8956D"}}>{stat.cat}</span>
+        </div>
+        <div className="cu-line" style={{marginBottom:12}}/>
+        <div style={{fontSize:13,fontWeight:300,lineHeight:1.65,color:"#EDE8E1",marginBottom:10}} dangerouslySetInnerHTML={{__html:stat.text}}/>
+        <div style={{fontSize:9,color:"#44403A",fontStyle:"italic",marginBottom:12}}>— {stat.source}</div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:10,borderTop:"1px solid #1a1a1a"}}>
+          <div style={{fontSize:9,letterSpacing:1,color:"#44403A"}}>Tap to explore all facts</div>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:2,color:"#B87333",cursor:"pointer"}} onClick={e=>{e.stopPropagation();onNext();}}>NEXT →</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── MAIN APP ──────────────────────────────────────────────────
+export default function App() {
+  const [screen,setScreen]         = useState("energy");
+  const [prevScreen,setPrev]       = useState("energy");
+  const [profile,setProfile]       = useState(null);
+  const [history,setHistory]       = useState([]);
+  const [collective,setCollective] = useState({totalWh:0,reports:0,founders:1});
+  const [vaultVisible,setVault]    = useState(false);
+  const [pendingResult,setPending] = useState(null);
+  const [activity,setActivity]     = useState("run");
+  const [result,setResult]         = useState(null);
+  const [knowsIdx,setKnowsIdx]     = useState(0);
+  const [knowsCat,setKnowsCat]     = useState("ALL");
+  const [aiKnows,setAiKnows]       = useState(null);
+  const [aiLoading,setAiLoading]   = useState(false);
+  const [postVault,setPostVault]   = useState(null);
+  const [loading,setLoading]       = useState(true);
+  const [nameInput,setNameInput]   = useState("");
+  const [founderInput,setFounder]  = useState("");
+  const [calcError,setCalcError]   = useState("");
+  const [guideVisible,setGuide]    = useState(false);
+  // activity fields
+  const [runMins,setRunMins]       = useState("");
+  const [runEffort,setRunEff]      = useState("moderate");
+  const [cycleMins,setCycleMins]   = useState("");
+  const [cycleEffort,setCycleEff]  = useState("recreational");
+  const [cycleWatts,setCycleW]     = useState("");
+  const [walkSteps,setWalkSteps]   = useState("");
+  const [walkDist,setWalkDist]     = useState("");
+  const [walkFlights,setWalkFl]    = useState("");
+  const [liftEx,setLiftEx]         = useState("bench");
+  const [liftLbs,setLiftLbs]       = useState("");
+  const [liftReps,setLiftReps]     = useState("");
+  const [liftSets,setLiftSets]     = useState("");
+  const [liftSpd,setLiftSpd]       = useState("normal");
+  const [liftTmp,setLiftTmp]       = useState("controlled");
+
+  // ── INIT ──
+  useEffect(()=>{
+    const p=load("nico_profile");
+    const h=load("nico_history")||[];
+    setProfile(p); setHistory(h);
+    if(!p)setScreen("onboard");
+    setLoading(false);
+    // Load collective
+    loadCollective().then(c=>{if(c)setCollective(c);});
+  },[]);
+
+  // Live collective polling (30s)
+  useEffect(()=>{
+    const iv=setInterval(()=>loadCollective().then(c=>{if(c)setCollective(c);}),30000);
+    return()=>clearInterval(iv);
+  },[]);
+
+  // ── DERIVED ──
+  const totalWh   = history.reduce((a,s)=>a+(s.totalWh||0),0);
+  const totalGrid = history.reduce((a,s)=>a+(s.gridWh||0),0);
+  const daysLogged= new Set(history.map(s=>s.date)).size;
+  const points    = calcPoints(totalWh,daysLogged);
+
+  const streakData=(()=>{
+    const days=[...new Set(history.map(s=>s.date))].sort().reverse();
+    if(!days.length)return{current:0,best:0};
+    const today=new Date().toISOString().slice(0,10);
+    const yest=new Date(Date.now()-864e5).toISOString().slice(0,10);
+    if(days[0]!==today&&days[0]!==yest)return{current:0,best:days.length>0?1:0};
+    let streak=1,best=1;
+    for(let i=1;i<days.length;i++){
+      const diff=Math.round((new Date(days[i-1]+"T12:00:00")-new Date(days[i]+"T12:00:00"))/864e5);
+      if(diff===1){streak++;best=Math.max(best,streak);}else{streak=1;}
+    }
+    return{current:streak,best:Math.max(best,streak)};
+  })();
+  const {current:currentStreak,best:bestStreak}=streakData;
+  const filteredStats=knowsCat==="ALL"?ALL_STATS:ALL_STATS.filter(s=>s.cat===knowsCat);
+  const currentStat=filteredStats[knowsIdx%filteredStats.length];
+  const chartData=[...history].reverse().slice(-14).map((s,i)=>({day:i+1,wh:parseFloat(s.totalWh?.toFixed(1)||0)}));
+
+  // ── NAV ──
+  const goTo=useCallback((s)=>{setPrev(screen);setScreen(s);},[screen]);
+
+  // ── ONBOARD ──
+  async function onboard(){
+    if(!nameInput.trim())return;
+    const num=founderInput.trim()||"001";
+    const p={name:nameInput.trim().toUpperCase(),founderNum:num,joined:new Date().toISOString()};
+    save("nico_profile",p); setProfile(p); setScreen("ceremony");
+  }
+
+  // ── CALCULATE ──
+  function calculate(){
+    setCalcError("");
+    let r=null;
+    if(activity==="run"){if(!runMins||parseFloat(runMins)<=0){setCalcError("How long did you run? Add your minutes above.");return;}r=calcRunning(parseFloat(runMins),runEffort);}
+    if(activity==="cycle"){if(!cycleMins||parseFloat(cycleMins)<=0){setCalcError("How long did you ride? Add your minutes above.");return;}r=calcCycling(parseFloat(cycleMins),cycleEffort,parseFloat(cycleWatts)||0);}
+    if(activity==="walk"){if((!walkSteps||parseFloat(walkSteps)<=0)&&(!walkDist||parseFloat(walkDist)<=0)){setCalcError("Add your steps or distance — even an estimate is a real number.");return;}r=calcWalking(parseFloat(walkSteps)||0,parseFloat(walkDist)||0,parseFloat(walkFlights)||0);}
+    if(activity==="lift"){if(!liftLbs||parseFloat(liftLbs)<=0){setCalcError("That weight doesn't look right — check the number.");return;}if(!liftReps||parseInt(liftReps)<=0){setCalcError("How many reps? Add that above.");return;}if(!liftSets||parseInt(liftSets)<=0){setCalcError("How many sets? Add that above.");return;}r=calcLifting(parseFloat(liftLbs),liftEx,parseInt(liftReps),parseInt(liftSets),liftSpd,liftTmp);}
+    if(!r||r.totalWh<=0){setCalcError("Something doesn't add up — check your numbers and try again.");return;}
+    const nicoScore=(r.totalWh/9).toFixed(2);
+    const summary=activity==="run"?`${runMins} min · ${runEffort}`:activity==="cycle"?`${cycleMins} min · ${cycleWatts||cycleEffort}W`:activity==="walk"?`${walkSteps||walkDist} ${walkSteps?"steps":"mi"}`:activity==="lift"?`${liftEx} ${liftLbs}lb × ${liftReps}×${liftSets}`:"";
+    const fr={...r,nicoScore,activity,label:activity.toUpperCase(),summary,date:new Date().toISOString().slice(0,10)};
+    setPending(fr); setResult(fr); goTo("result");
+  }
+
+  // ── SAVE + VAULT ──
+  async function saveSession(){
+    if(!pendingResult)return;
+    const newH=[pendingResult,...history];
+    setHistory(newH); save("nico_history",newH);
+    const newCol={totalWh:(collective.totalWh||0)+pendingResult.totalWh,reports:(collective.reports||0)+1,founders:Math.max(collective.founders||1,parseInt(profile?.founderNum||1))};
+    setCollective(newCol); saveCollective(newCol);
+    setVault(true);
+  }
+
+  function onVaultComplete(){
+    setVault(false);
+    const saved=pendingResult;
+    setPending(null); setResult(null); goTo("me");
+    if(saved){
+      const whN=saved.totalWh.toFixed(1),phones=Math.floor(saved.totalWh/12),chatGPT=(saved.totalWh/0.34).toFixed(0);
+      const prompt=`The user just completed a ${saved.label} session generating ${whN} Wh. Lifetime: ${(totalWh+saved.totalWh).toFixed(1)} Wh over ${daysLogged+1} days. Streak: ${currentStreak} days. Context: ${whN} Wh = ~${phones} phone charges = ~${chatGPT} ChatGPT queries. Generate one sharp, personalized NICO KNOWS insight connecting this session to a real energy or data fact. 2 sentences. Source in parentheses.`;
+      askClaude(prompt).then(r=>{if(r)setPostVault(r);});
+    }
+  }
+
+  // ── EXPORT ──
+  function exportData(){
+    const blob=new Blob([JSON.stringify({exportDate:new Date().toISOString(),profile,lifetimeStats:{totalWh:parseFloat(totalWh.toFixed(2)),totalGridWh:parseFloat(totalGrid.toFixed(2)),sessionsLogged:history.length,daysLogged,points,currentStreak,bestStreak},sessions:history},null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a"); a.href=url; a.download=`NICO_${profile?.name||"data"}_${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  }
+
+  async function deleteAllData(){
+    if(!window.confirm("Delete your entire NICO record? This cannot be undone."))return;
+    save("nico_profile",null); save("nico_history",null);
+    setProfile(null); setHistory([]); setScreen("onboard");
+  }
+
+  // ── AI KNOWS ──
+  async function fetchAiKnows(){
+    setAiLoading(true); setAiKnows(null);
+    const ctx=totalWh>0?`User has generated ${totalWh.toFixed(1)} Wh across ${daysLogged} sessions. Last activity: ${history[0]?.label||"unknown"}.`:"New NICO user.";
+    const r=await askClaude(`${ctx} Generate one sharp, surprising, sourced NICO KNOWS fact about data ownership, human energy, or AI's environmental cost. Make it feel personal to someone who just worked out. 2 sentences max.`);
+    setAiKnows(r); setAiLoading(false);
+  }
+
+  if(loading)return(<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#000",flexDirection:"column",gap:12}}><style>{CSS}</style><div className="cu" style={{fontFamily:"'Space Mono',monospace",fontSize:32,fontWeight:700,letterSpacing:6}}>NICO</div><div style={{fontSize:9,letterSpacing:3,color:"#28241F"}}>LOADING...</div></div>);
+
+  const NOHIDE=["onboard","result","ceremony"];
+  return(
+    <>
+      <style>{CSS}</style>
+      <DataBankVault wh={pendingResult?.totalWh?.toFixed(1)} activity={pendingResult?.activity} visible={vaultVisible} founderNum={profile?.founderNum} onComplete={onVaultComplete}/>
+
+      <div style={{width:"100%",maxWidth:430,background:"#000",minHeight:"100vh",position:"relative",overflow:"hidden"}}>
+        {/* Status bar */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 24px 6px"}}>
+          <span style={{fontSize:12,fontWeight:600,color:"#28241F"}}>NICO</span>
+          <span style={{fontSize:10,color:"#28241F",letterSpacing:1}}>{profile?.founderNum?"#"+profile.founderNum:""}</span>
+        </div>
+
+        <div style={{minHeight:"calc(100vh - 80px)",paddingBottom:80,position:"relative"}}>
+
+          {/* ══ ONBOARD ══ */}
+          {screen==="onboard"&&<LuxuryOnboard nameInput={nameInput} setNameInput={setNameInput} founderInput={founderInput} setFounderInput={setFounder} onSubmit={onboard}/>}
+
+          {/* ══ CEREMONY ══ */}
+          {screen==="ceremony"&&<CeremonyScreen profile={profile} onEnter={()=>setScreen("energy")}/>}
+
+          {/* ══ ENERGY ══ */}
+          {screen==="energy"&&(
+            <div className="screen-enter">
+              {guideVisible&&<HealthGuide onClose={()=>setGuide(false)}/>}
+              <div style={{padding:"6px 20px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div className="cu" style={{fontFamily:"'Space Mono',monospace",fontSize:22,fontWeight:700,letterSpacing:4}}>NICO</div>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <span style={{fontSize:8,letterSpacing:1,fontWeight:700,color:"#44403A",cursor:"pointer"}} onClick={()=>setGuide(true)}>FIND NUMBERS ›</span>
+                  <div className="pt-badge"><BoltIcon size={13}/><span style={{fontSize:9,letterSpacing:2,fontWeight:700,color:"#E8956D"}}>{points} PTS</span></div>
+                </div>
+              </div>
+              <div style={{overflowY:"auto",padding:"0 20px",maxHeight:"calc(100vh - 140px)"}}>
+                <div style={{fontSize:9,letterSpacing:4,fontWeight:700,color:"#44403A",marginBottom:12}}>WHAT DID YOU CREATE TODAY?</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:20}}>
+                  {[["run","🏃","RUN"],["cycle","🚴","CYCLE"],["walk","🚶","WALK"],["lift","🏋️","LIFT"]].map(([id,icon,lbl])=>(
+                    <div key={id} className={`act-card${activity===id?" sel":""}`} onClick={()=>setActivity(id)}>
+                      <div style={{fontSize:28,marginBottom:8}}>{icon}</div>
+                      <div style={{fontSize:10,letterSpacing:3,fontWeight:700,color:activity===id?"#E8956D":"#44403A"}}>{lbl}</div>
+                    </div>
+                  ))}
+                </div>
+                {activity==="run"&&(<>
+                  <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>DURATION</div>
+                  <input className="nico-input" style={{marginBottom:14}} type="number" placeholder="minutes" value={runMins} onChange={e=>setRunMins(e.target.value)}/>
+                  <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>EFFORT</div>
+                  <div style={{display:"flex",gap:8,marginBottom:20}}>
+                    {[["moderate","MODERATE"],["vigorous","VIGOROUS"]].map(([k,l])=>(
+                      <div key={k} className={`tog${runEffort===k?" on":""}`} onClick={()=>setRunEff(k)}>
+                        <div style={{fontSize:10,letterSpacing:2,fontWeight:700,color:runEffort===k?"#E8956D":"#44403A"}}>{l}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>)}
+                {activity==="cycle"&&(<>
+                  <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>DURATION</div>
+                  <input className="nico-input" style={{marginBottom:14}} type="number" placeholder="minutes" value={cycleMins} onChange={e=>setCycleMins(e.target.value)}/>
+                  <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>AVG WATTS (optional)</div>
+                  <input className="nico-input" style={{marginBottom:14}} type="number" placeholder="from Peloton / Zwift / Wahoo" value={cycleWatts} onChange={e=>setCycleW(e.target.value)}/>
+                  <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>EFFORT (if no watts)</div>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:20}}>
+                    {[["light","LIGHT"],["recreational","RECR."],["moderate","MOD."],["hard","HARD"]].map(([k,l])=>(
+                      <div key={k} className={`tog${cycleEffort===k?" on":""}`} style={{flex:"1 1 40%"}} onClick={()=>setCycleEff(k)}>
+                        <div style={{fontSize:9,letterSpacing:2,fontWeight:700,color:cycleEffort===k?"#E8956D":"#44403A"}}>{l}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>)}
+                {activity==="walk"&&(<>
+                  <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>STEPS</div>
+                  <input className="nico-input" style={{marginBottom:14}} type="number" placeholder="e.g. 10000" value={walkSteps} onChange={e=>setWalkSteps(e.target.value)}/>
+                  <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>DISTANCE (optional override)</div>
+                  <input className="nico-input" style={{marginBottom:14}} type="number" placeholder="miles" value={walkDist} onChange={e=>setWalkDist(e.target.value)}/>
+                  <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>FLIGHTS CLIMBED</div>
+                  <input className="nico-input" style={{marginBottom:20}} type="number" placeholder="optional" value={walkFlights} onChange={e=>setWalkFl(e.target.value)}/>
+                </>)}
+                {activity==="lift"&&(<>
+                  <div style={{display:"flex",gap:8,marginBottom:14}}>
+                    {[["bench","BENCH"],["squat","SQUAT"],["deadlift","DEADLIFT"]].map(([k,l])=>(
+                      <div key={k} className={`tog${liftEx===k?" on":""}`} style={{flex:1}} onClick={()=>{setLiftEx(k);setLiftSpd(LIFT_DEF[k].s);setLiftTmp(LIFT_DEF[k].t);}}>
+                        <div style={{fontSize:9,letterSpacing:2,fontWeight:700,color:liftEx===k?"#E8956D":"#44403A"}}>{l}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>WEIGHT (LB)</div>
+                  <input className="nico-input" style={{marginBottom:14}} type="number" placeholder="e.g. 135" value={liftLbs} onChange={e=>setLiftLbs(e.target.value)}/>
+                  <div style={{display:"flex",gap:8,marginBottom:14}}>
+                    <div style={{flex:1}}><div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>REPS</div><input className="nico-input" type="number" placeholder="e.g. 8" value={liftReps} onChange={e=>setLiftReps(e.target.value)}/></div>
+                    <div style={{flex:1}}><div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>SETS</div><input className="nico-input" type="number" placeholder="e.g. 3" value={liftSets} onChange={e=>setLiftSets(e.target.value)}/></div>
+                  </div>
+                  <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>LIFT SPEED</div>
+                  <div style={{display:"flex",gap:6,marginBottom:12}}>
+                    {[["explosive","EXPL."],["fast","FAST"],["normal","NORM."],["slow","SLOW"]].map(([k,l])=>(
+                      <div key={k} className={`tog${liftSpd===k?" on":""}`} style={{flex:1}} onClick={()=>setLiftSpd(k)}>
+                        <div style={{fontSize:8,letterSpacing:1,fontWeight:700,color:liftSpd===k?"#E8956D":"#44403A"}}>{l}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>LOWER TEMPO</div>
+                  <div style={{display:"flex",gap:6,marginBottom:20}}>
+                    {[["controlled","CTRL"],["normal","NORM"],["fast","FAST"],["dropped","DROP"]].map(([k,l])=>(
+                      <div key={k} className={`tog${liftTmp===k?" on":""}`} style={{flex:1}} onClick={()=>setLiftTmp(k)}>
+                        <div style={{fontSize:8,letterSpacing:1,fontWeight:700,color:liftTmp===k?"#E8956D":"#44403A"}}>{l}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>)}
+                <button className="cu-btn" onClick={calculate}>CALCULATE ENERGY →</button>
+                {calcError&&<div style={{marginTop:12,padding:"12px 16px",borderRadius:12,background:"rgba(184,115,51,.06)",border:"1px solid rgba(184,115,51,.2)",fontSize:12,fontWeight:300,color:"#E8956D",lineHeight:1.6,animation:"formRise .3s ease"}}>{calcError}</div>}
+                <div style={{height:14}}/><div className="cu-line"/><div style={{height:12}}/>
+                <NicoKnowsMini stat={currentStat} onNext={()=>setKnowsIdx(i=>(i+1)%filteredStats.length)} onExpand={()=>goTo("knows")}/>
+                <div style={{height:40}}/>
+              </div>
+            </div>
+          )}
+
+          {/* ══ RESULT ══ */}
+          {screen==="result"&&result&&(
+            <div className="screen-enter">
+              <div style={{padding:"6px 20px 0",display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontSize:10,letterSpacing:1,fontWeight:700,color:"#B87333",cursor:"pointer"}} onClick={()=>goTo("energy")}>← BACK</span>
+                <span className="cu" style={{fontSize:10,letterSpacing:4,fontWeight:700}}>RESULT</span>
+              </div>
+              <div style={{overflowY:"auto",padding:"0 20px",maxHeight:"calc(100vh - 80px)"}}>
+                <div className="cu-card" style={{marginBottom:16}}>
+                  <div className="cu-card-inner" style={{padding:"0 22px 22px"}}>
+                    <EnergyReveal wh={result.totalWh.toFixed(2)}/>
+                    <div className="cu-line" style={{marginBottom:18}}/>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:18,marginBottom:16}}>
+                      <div><div style={{fontSize:8,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:6}}>GRID EST.</div><div className="cu-soft" style={{fontFamily:"'Space Mono',monospace",fontSize:20,fontWeight:700}}>{result.gridWh.toFixed(2)} Wh</div></div>
+                      <div><div style={{fontSize:8,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:6}}>POINTS EARNED</div><div className="cu-soft" style={{fontFamily:"'Space Mono',monospace",fontSize:20,fontWeight:700}}>+{1+Math.floor(result.totalWh/99)}</div></div>
+                    </div>
+                    {result.activity==="lift"&&result.ph1&&(
+                      <div style={{background:"#131313",borderRadius:12,padding:16,border:"1px solid #1a1a1a",marginBottom:14}}>
+                        <div style={{fontSize:8,letterSpacing:3,fontWeight:700,color:"#B87333",marginBottom:8}}>PHASE BREAKDOWN</div>
+                        <div style={{fontSize:12,fontWeight:300,color:"#8A857C",marginBottom:4}}>↑ Lift: {result.ph1.toFixed(2)} Wh</div>
+                        <div style={{fontSize:12,fontWeight:300,color:"#8A857C"}}>↓ Lower: {result.ph2.toFixed(2)} Wh</div>
+                      </div>
+                    )}
+                    <div style={{background:"#131313",borderRadius:12,padding:14,border:"1px solid #1a1a1a",textAlign:"center"}}>
+                      <div style={{fontSize:8,letterSpacing:4,fontWeight:700,color:"#44403A",marginBottom:6}}>COULD POWER</div>
+                      <div style={{fontSize:12,fontWeight:300,color:"#8A857C"}}>~{Math.floor(result.totalWh/12)} phone charge{Math.floor(result.totalWh/12)!==1?"s":""} · ~{Math.floor(result.totalWh/0.007)} LED hours</div>
+                    </div>
+                    <div style={{marginTop:10,fontSize:9,color:"#28241F",textAlign:"center",lineHeight:1.6}}>Grid numbers are estimates, pending hardware validation.</div>
+                  </div>
+                </div>
+                <button className="cu-btn" onClick={saveSession}>SAVE TO THE VAULT ⚡</button>
+                <button onClick={()=>goTo("energy")} style={{width:"100%",padding:14,background:"transparent",border:"none",fontSize:10,fontWeight:700,letterSpacing:3,color:"#44403A",marginTop:4,cursor:"pointer"}}>DISCARD</button>
+                <div style={{height:40}}/>
+              </div>
+            </div>
+          )}
+
+          {/* ══ ME ══ */}
+          {screen==="me"&&(
+            <div className="screen-enter">
+              <div style={{padding:"6px 20px 18px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div className="cu" style={{fontFamily:"'Space Mono',monospace",fontSize:22,fontWeight:700,letterSpacing:4}}>NICO</div>
+                <div className="pt-badge"><BoltIcon size={13}/><span style={{fontSize:9,letterSpacing:2,fontWeight:700,color:"#E8956D"}}>{points} PTS</span></div>
+              </div>
+              <div style={{overflowY:"auto",padding:"0 20px",maxHeight:"calc(100vh - 80px)"}}>
+                <div style={{marginBottom:18}}>
+                  <div className="cu" style={{fontSize:26,fontWeight:800,letterSpacing:-.5}}>{profile?.name||"FOUNDER"}</div>
+                  <div style={{fontSize:10,letterSpacing:4,fontWeight:700,color:"#44403A",marginTop:2}}>FOUNDER #{profile?.founderNum||"001"} OF 999</div>
+                  {profile?.joined&&<div style={{fontSize:9,color:"#28241F",letterSpacing:2,marginTop:3}}>SINCE {new Date(profile.joined).toLocaleDateString("en-US",{month:"long",year:"numeric"}).toUpperCase()}</div>}
+                </div>
+                {/* Streak + stats */}
+                <div style={{display:"flex",gap:12,marginBottom:16,alignItems:"stretch"}}>
+                  <div className={currentStreak>=3?"streak-active":""} style={{background:"#0d0d0d",borderRadius:18,border:"1px solid #1a1a1a",padding:"14px 10px",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minWidth:82,position:"relative"}}>
+                    <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:"linear-gradient(to right,transparent,rgba(184,115,51,.45),transparent)"}}/>
+                    <StreakRing current={currentStreak} best={bestStreak} size={60}/>
+                    <div style={{fontSize:7,letterSpacing:2,fontWeight:700,color:"#44403A",marginTop:6}}>STREAK</div>
+                    {bestStreak>0&&<div style={{fontSize:7,color:"#28241F",marginTop:2}}>BEST {bestStreak}</div>}
+                  </div>
+                  <div style={{flex:1,display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                    {[[totalWh.toFixed(1),"TOTAL Wh"],[totalGrid.toFixed(1),"GRID est."],[history.length,"SESSIONS"],[points,"POINTS"]].map(([v,l])=>(
+                      <div key={l} className="stat-top" style={{background:"#0d0d0d",borderRadius:12,border:"1px solid #1a1a1a",padding:"12px 8px",textAlign:"center",position:"relative"}}>
+                        <div className="cu" style={{fontFamily:"'Space Mono',monospace",fontSize:14,fontWeight:700,marginBottom:3}}>{v}</div>
+                        <div style={{fontSize:7,letterSpacing:2,fontWeight:700,color:"#44403A"}}>{l}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                {/* Post-vault insight */}
+                {postVault&&(
+                  <div className="insight-card cu-card" style={{marginBottom:16}}>
+                    <div className="cu-card-inner" style={{padding:18}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                        <BoltIcon size={16}/><span className="cu" style={{fontSize:9,letterSpacing:3,fontWeight:700}}>YOUR INSIGHT</span>
+                        <span style={{marginLeft:"auto",fontSize:7,letterSpacing:2,fontWeight:700,padding:"3px 8px",borderRadius:100,background:"rgba(184,115,51,.12)",border:"1px solid rgba(184,115,51,.25)",color:"#E8956D"}}>PERSONALIZED</span>
+                      </div>
+                      <div className="cu-line" style={{marginBottom:10}}/>
+                      <div style={{fontSize:13,fontWeight:300,lineHeight:1.65,color:"#EDE8E1",marginBottom:10}}>{postVault}</div>
+                      <button onClick={()=>setPostVault(null)} style={{background:"none",border:"none",fontSize:9,color:"#44403A",cursor:"pointer",letterSpacing:1,padding:0}}>DISMISS</button>
+                    </div>
+                  </div>
+                )}
+                {/* Chart */}
+                {chartData.length>1&&(
+                  <div style={{background:"#0d0d0d",borderRadius:16,border:"1px solid #1a1a1a",padding:"16px 8px 8px",marginBottom:16}}>
+                    <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:10,paddingLeft:8}}>WH HISTORY</div>
+                    <ResponsiveContainer width="100%" height={72}><LineChart data={chartData}><Line type="monotone" dataKey="wh" stroke="#B87333" strokeWidth={2} dot={false}/><Tooltip contentStyle={{background:"#0d0d0d",border:"1px solid #2a2a2a",borderRadius:8,fontSize:11}}/></LineChart></ResponsiveContainer>
+                  </div>
+                )}
+                {/* Collective band */}
+                <div style={{position:"relative",borderRadius:20,marginBottom:16,overflow:"hidden"}}>
+                  <div className="cu-metal" style={{padding:"20px 22px",borderRadius:20}}>
+                    <div style={{position:"relative",zIndex:1}}>
+                      <div style={{fontSize:8,letterSpacing:4,fontWeight:700,color:"rgba(0,0,0,.55)",marginBottom:6}}>THE 999 COLLECTIVE — TOTAL GENERATED</div>
+                      <div style={{fontFamily:"'Space Mono',monospace",fontSize:30,fontWeight:700,letterSpacing:-1,color:"#1a0a00",marginBottom:4,textShadow:"0 1px 0 rgba(255,255,255,.2)"}}>{collective.totalWh>0?(collective.totalWh/1000).toFixed(2)+" kWh":"Building..."}</div>
+                      <div style={{fontSize:11,fontWeight:400,color:"rgba(0,0,0,.55)",lineHeight:1.5,marginBottom:14}}>{collective.reports} sessions logged · {collective.founders} founder{collective.founders!==1?"s":""} building</div>
+                    </div>
+                  </div>
+                </div>
+                {/* NICO KNOWS mini */}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:10}}>
+                  <div style={{fontSize:9,letterSpacing:4,fontWeight:700,color:"#44403A"}}>NICO KNOWS</div>
+                  <div style={{fontSize:10,letterSpacing:1,cursor:"pointer"}} className="cu-soft" onClick={()=>goTo("knows")}>SEE ALL →</div>
+                </div>
+                <NicoKnowsMini stat={currentStat} onNext={()=>setKnowsIdx(i=>(i+1)%filteredStats.length)} onExpand={()=>goTo("knows")}/>
+                {/* History */}
+                <div style={{fontSize:9,letterSpacing:4,fontWeight:700,color:"#44403A",margin:"20px 0 12px"}}>YOUR HISTORY</div>
+                {history.length===0
+                  ?<div style={{padding:"24px 0",textAlign:"center"}}><div style={{fontSize:13,fontWeight:300,color:"#44403A",marginBottom:6}}>Your record starts with your first log.</div><div style={{fontSize:10,color:"#28241F",letterSpacing:1}}>Every session you save here is permanent.</div></div>
+                  :history.slice(0,10).map((w,i)=>(
+                    <div key={i} className="hist-item">
+                      <div>
+                        <div className="cu-soft" style={{fontSize:9,letterSpacing:3,fontWeight:700,marginBottom:3}}>{w.label}</div>
+                        <div style={{fontSize:12,fontWeight:300,color:"#8A857C"}}>{w.summary}</div>
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        <div className="cu" style={{fontFamily:"'Space Mono',monospace",fontSize:15,fontWeight:700,marginBottom:2}}>{w.totalWh?.toFixed(2)} Wh</div>
+                        <div style={{fontSize:9,color:"#44403A"}}>{w.date}</div>
+                      </div>
+                    </div>
+                  ))
+                }
+                <div style={{fontSize:10,color:"#28241F",textAlign:"center",padding:"16px 0",letterSpacing:.5,lineHeight:1.6}}>Your data belongs to you.<br/>Export or delete anytime.</div>
+                <div style={{height:40}}/>
+              </div>
+            </div>
+          )}
+
+          {/* ══ NICO KNOWS FULL ══ */}
+          {screen==="knows"&&(
+            <div className="screen-enter">
+              <div style={{padding:"6px 20px 14px",display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontSize:10,letterSpacing:1,fontWeight:700,color:"#B87333",cursor:"pointer"}} onClick={()=>goTo(prevScreen==="knows"?"me":prevScreen)}>← BACK</span>
+                <span className="cu" style={{fontSize:10,letterSpacing:5,fontWeight:700}}>NICO KNOWS</span>
+              </div>
+              <div style={{overflowY:"auto",padding:"0 20px",maxHeight:"calc(100vh - 80px)"}}>
+                <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:14,scrollbarWidth:"none"}}>
+                  {CATS.map(c=><div key={c} className={`pill${knowsCat===c?" on":""}`} onClick={()=>{setKnowsCat(c);setKnowsIdx(0);}}>{c}</div>)}
+                </div>
+                <div className="prog-track" style={{marginBottom:18}}>
+                  <div className="prog-fill" style={{width:`${((knowsIdx%filteredStats.length+1)/filteredStats.length*100).toFixed(0)}%`}}/>
+                </div>
+                <button onClick={fetchAiKnows} style={{width:"100%",padding:"12px 16px",background:"rgba(184,115,51,.06)",border:"1px solid rgba(184,115,51,.25)",borderRadius:12,fontSize:9,fontWeight:700,letterSpacing:3,color:"#B87333",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:14}}>
+                  <BoltIcon size={13}/>{aiLoading?"GENERATING...":"GENERATE PERSONALIZED FACT"}
+                </button>
+                {aiKnows&&(
+                  <div className="cu-card" style={{marginBottom:14}}>
+                    <div className="cu-card-inner" style={{padding:18}}>
+                      <div style={{fontSize:8,letterSpacing:3,fontWeight:700,color:"#B87333",marginBottom:8}}>⚡ AI · PERSONALIZED</div>
+                      <div style={{fontSize:13,fontWeight:300,lineHeight:1.65,color:"#EDE8E1"}}>{aiKnows}</div>
+                    </div>
+                  </div>
+                )}
+                <div className="cu-card" style={{marginBottom:14}}>
+                  <div className="cu-card-inner" style={{padding:"20px 18px"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+                      <BoltIcon size={18}/><span className="cu" style={{fontSize:9,letterSpacing:4,fontWeight:700}}>NICO KNOWS</span>
+                      <span style={{marginLeft:"auto",fontSize:7,letterSpacing:2,fontWeight:700,padding:"3px 8px",borderRadius:100,background:"rgba(184,115,51,.12)",border:"1px solid rgba(184,115,51,.25)",color:"#E8956D"}}>{currentStat.cat}</span>
+                    </div>
+                    <div className="cu-line" style={{marginBottom:12}}/>
+                    <div style={{fontSize:14,fontWeight:300,lineHeight:1.7,color:"#EFE9E1",marginBottom:12}} dangerouslySetInnerHTML={{__html:currentStat.text}}/>
+                    <div style={{fontSize:10,color:"#44403A",fontStyle:"italic"}}>— {currentStat.source}</div>
+                  </div>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                  <span style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A"}}>FACT</span>
+                  <span className="cu" style={{fontFamily:"'Space Mono',monospace",fontSize:11,fontWeight:700}}>{String((knowsIdx%filteredStats.length)+1).padStart(2,"0")} / {String(filteredStats.length).padStart(2,"0")}</span>
+                </div>
+                <div style={{display:"flex",gap:10}}>
+                  <button onClick={()=>setKnowsIdx(i=>(i-1+filteredStats.length)%filteredStats.length)} style={{flex:1,padding:14,background:"#0d0d0d",border:"1px solid #1a1a1a",borderRadius:14,fontSize:10,fontWeight:700,letterSpacing:2,color:"#8A857C",cursor:"pointer"}}>← PREV</button>
+                  <button className="cu-btn" onClick={()=>setKnowsIdx(i=>(i+1)%filteredStats.length)} style={{flex:2,padding:14}}>NEXT FACT →</button>
+                </div>
+                <div style={{height:40}}/>
+              </div>
+            </div>
+          )}
+
+          {/* ══ PROFILE ══ */}
+          {screen==="profile"&&(
+            <div className="screen-enter">
+              <div style={{padding:"6px 20px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div className="cu" style={{fontFamily:"'Space Mono',monospace",fontSize:22,fontWeight:700,letterSpacing:4}}>NICO</div>
+                <div style={{fontSize:9,letterSpacing:2,fontWeight:700,color:"#44403A"}}>PROFILE</div>
+              </div>
+              <div style={{overflowY:"auto",padding:"0 20px",maxHeight:"calc(100vh - 80px)"}}>
+                <div style={{textAlign:"center",marginBottom:28}}>
+                  <CopperOrb wh={totalWh} size={68}/>
+                  <div className="cu" style={{fontSize:22,fontWeight:800,marginTop:14,letterSpacing:-.5}}>{profile?.name}</div>
+                  <div style={{fontSize:10,letterSpacing:4,fontWeight:700,color:"#44403A",marginTop:4}}>FOUNDER #{profile?.founderNum} OF 999</div>
+                  {profile?.joined&&<div style={{fontSize:9,color:"#28241F",letterSpacing:2,marginTop:4}}>SINCE {new Date(profile.joined).toLocaleDateString("en-US",{month:"long",year:"numeric"}).toUpperCase()}</div>}
+                  <div style={{marginTop:12}} className="pt-badge"><BoltIcon size={13}/><span style={{fontSize:10,letterSpacing:2,fontWeight:700,color:"#E8956D"}}>{points} LIFETIME POINTS</span></div>
+                  <div style={{marginTop:6,fontSize:9,color:"#44403A",letterSpacing:1}}>{daysLogged} days logged · +1 per 99 Wh · never resets</div>
+                </div>
+                {[
+                  ["ACCOUNT",[["👤","Name",profile?.name,"",null],["#","Founder Number",`#${profile?.founderNum} of 999`,"",null],["📱","NICO Daily Text","9 AM · Active","ON",null]]],
+                  ["YOUR DATA",[["📤","Export All Data","Download your complete record","→",exportData],["🗑","Delete All Data","Permanently remove your record","→",deleteAllData]]],
+                  ["FORMULA",[["⚡","COIL™ Calculation","Grounded in real physics","v16",null],["🔒","Data Privacy","Your data is never sold","OWNED",null],["◈","Point System","+1/day logged · +1/99 Wh · lifetime","FOREVER",null]]]
+                ].map(([section,items])=>(
+                  <div key={section} style={{marginBottom:20}}>
+                    <div style={{fontSize:9,letterSpacing:4,fontWeight:700,color:"#44403A",marginBottom:8,paddingLeft:4}}>{section}</div>
+                    <div style={{background:"#0d0d0d",borderRadius:14,border:"1px solid #1a1a1a",overflow:"hidden"}}>
+                      {items.map(([icon,label,sub,val,action],i)=>(
+                        <div key={i} className="sett-row" onClick={action||undefined} style={{cursor:action?"pointer":"default"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:12}}>
+                            <div style={{width:32,height:32,borderRadius:8,background:"#131313",border:"1px solid #1a1a1a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>{icon}</div>
+                            <div><div style={{fontSize:13,fontWeight:500}}>{label}</div><div style={{fontSize:10,color:"#44403A",marginTop:1}}>{sub}</div></div>
+                          </div>
+                          <span style={{fontSize:10,fontWeight:700,color:action?"#E8956D":undefined}} className={action?"":"cu-soft"}>{val}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                <div style={{borderRadius:16,background:"#0d0d0d",border:"1px solid #1a1a1a",padding:20,textAlign:"center",position:"relative",overflow:"hidden"}}>
+                  <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:"linear-gradient(to right,transparent,rgba(184,115,51,.6),transparent)"}}/>
+                  <div style={{fontSize:22,marginBottom:8}}>◈</div>
+                  <div className="cu" style={{fontSize:11,letterSpacing:4,fontWeight:700,marginBottom:6}}>NINE INERGY CORPORATION</div>
+                  <div style={{fontSize:10,color:"#44403A",letterSpacing:.5,lineHeight:1.6}}>You didn't download an app.<br/>You joined a movement.</div>
+                </div>
+                <div style={{height:40}}/>
+              </div>
+            </div>
+          )}
+
+        </div>
+
+        {/* ══ TAB BAR ══ */}
+        {!NOHIDE.includes(screen)&&(
+          <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:430,background:"rgba(0,0,0,.94)",backdropFilter:"blur(20px)",borderTop:"1px solid #1a1a1a",display:"flex",padding:"10px 0 28px",zIndex:50}}>
+            {[["energy","⚡","ENERGY"],["me","◎","ME"],["profile","◈","PROFILE"]].map(([id,icon,lbl])=>(
+              <div key={id} onClick={()=>goTo(id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4,cursor:"pointer",padding:"4px 0",transition:"all .2s"}}>
+                <div style={{fontSize:18,lineHeight:1,filter:screen===id?"none":"grayscale(1) brightness(.3)"}}>{icon}</div>
+                <div style={{fontSize:9,letterSpacing:2,fontWeight:700,color:screen===id?"#E8956D":"#44403A"}}>{lbl}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
