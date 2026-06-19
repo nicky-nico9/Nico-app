@@ -378,7 +378,7 @@ function EnergyReveal({wh}) {
 }
 
 // ── LUXURY ONBOARD ────────────────────────────────────────────
-function LuxuryOnboard({nameInput,setNameInput,founderInput,setFounderInput,onSubmit}) {
+function LuxuryOnboard({nameInput,setNameInput,founderInput,setFounderInput,onSubmit,error}) {
   const [letters,setLetters]=useState([false,false,false,false]);
   const [tagline,setTag]=useState(false);
   const [line1,setLine1]=useState(false);
@@ -430,6 +430,7 @@ function LuxuryOnboard({nameInput,setNameInput,founderInput,setFounderInput,onSu
         <div style={{fontSize:9,letterSpacing:3,fontWeight:700,color:"#44403A",marginBottom:8}}>FOUNDER NUMBER</div>
         <input className="nico-input" style={{marginBottom:24}} placeholder="e.g. 001" value={founderInput} onChange={e=>setFounderInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&onSubmit()}/>
         <button className="cu-btn" onClick={onSubmit} style={{fontSize:12,letterSpacing:4}}>ENTER THE MOVEMENT →</button>
+        {error&&<div style={{marginTop:14,padding:"12px 16px",borderRadius:12,background:"rgba(184,115,51,.08)",border:"1px solid rgba(184,115,51,.3)",fontSize:12,fontWeight:300,color:"#E8956D",lineHeight:1.5,textAlign:"center",animation:"formRise .3s ease"}}>{error}</div>}
         <div style={{fontSize:9,color:"#28241F",textAlign:"center",marginTop:16,letterSpacing:.5,lineHeight:1.8}}>Your number is permanent. It cannot be reissued.<br/>Only 999 will ever exist.</div>
       </div>
     </div>
@@ -606,9 +607,12 @@ export default function App() {
   const goTo=useCallback((s)=>{setPrev(screen);setScreen(s);},[screen]);
 
   // ── ONBOARD ──
+  const [onboardError, setOnboardError] = useState("");
   async function onboard(){
-    if(!nameInput.trim())return;
-    const num=founderInput.trim()||"001";
+    setOnboardError("");
+    if(!nameInput.trim()){ setOnboardError("Enter your name to continue."); return; }
+    if(!founderInput.trim()){ setOnboardError("Enter your founder number — it's your key. No number, no entry."); return; }
+    const num=founderInput.trim();
     const p={name:nameInput.trim().toUpperCase(),founderNum:num,joined:new Date().toISOString()};
     save("nico_profile",p); setProfile(p); setScreen("ceremony");
   }
@@ -702,7 +706,7 @@ export default function App() {
         <div style={{minHeight:"calc(100vh - 80px)",paddingBottom:80,position:"relative"}}>
 
           {/* ══ ONBOARD ══ */}
-          {screen==="onboard"&&<LuxuryOnboard nameInput={nameInput} setNameInput={setNameInput} founderInput={founderInput} setFounderInput={setFounder} onSubmit={onboard}/>}
+          {screen==="onboard"&&<LuxuryOnboard nameInput={nameInput} setNameInput={setNameInput} founderInput={founderInput} setFounderInput={setFounder} onSubmit={onboard} error={onboardError}/>}
 
           {/* ══ CEREMONY ══ */}
           {screen==="ceremony"&&<CeremonyScreen profile={profile} onEnter={()=>setScreen("energy")}/>}
